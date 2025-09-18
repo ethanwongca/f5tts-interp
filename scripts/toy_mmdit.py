@@ -40,63 +40,63 @@ class FeaturePatchHook:
         feature_index: int | None = None, 
         patch_vec: torch.Tensor | float = 0.0
     ):
-    """
-    Initializes our patch hook parameters. 
+        """
+        Initializes our patch hook parameters. 
 
-    Args:
-        batch_index (int | None): Index of batch to modify, if None all batches
-        feature_index (int | None): Index of feature to modify, if None all features
-        patch_vector (torch.tensor | floar): A torch vector size (seq_len,), or a float to fill with
-    """
-    self.batch_index = batch_index
-    self.feature_index = feature_index
-    self.patch_vec = patch_vec
+        Args:
+            batch_index (int | None): Index of batch to modify, if None all batches
+            feature_index (int | None): Index of feature to modify, if None all features
+            patch_vector (torch.tensor | floar): A torch vector size (seq_len,), or a float to fill with
+        """
+        self.batch_index = batch_index
+        self.feature_index = feature_index
+        self.patch_vec = patch_vec
 
     # Where we call our patch hook 
     def __call__(self, module, input, output) -> torch.Tensor:
-    """
-    Calling our forward hook for our particular feature 
-    Args:
-        module: This call upon our particular PyTorch layer 
-        input: This is the input value into the module 
-        output: This is the output value from our module and what we are trying to modify 
+        """
+        Calling our forward hook for our particular feature 
+        Args:
+            module: This call upon our particular PyTorch layer 
+            input: This is the input value into the module 
+            output: This is the output value from our module and what we are trying to modify 
 
-    Output:
-        Pytorch.Tensor: This is our change tensor 
-    """
-    
-    batch_size, seq_len, feature_size = output.size()
-    
-    if isinstance(self.patch_vec, float):
-        self.patch_vec = torch.full(
-            (seq_len, ), 
-            self.patch_vec, 
-            device=output.device, 
-            dtype=output.dtype
-        )
-    
-    if self.patch_vec.ndim != 1 or self.patch_vec.shape[0] != seq_len:
-        raise ValueError(f"Patch vector must be 1D with length {seq_len}, but got shape {self.patch_vec.shape}")
-    
-    # Reshapping our vector to be 3D to change our output 
-    if self.batch_index is None and self.feature_index is None:
-        patch_reshape = self.patch_vec.view(1, seq_len, 1)
-        output[:,:,:] = patch_reshape
+        Output:
+            Pytorch.Tensor: This is our change tensor 
+        """
+        
+        batch_size, seq_len, feature_size = output.size()
+        
+        if isinstance(self.patch_vec, float):
+            self.patch_vec = torch.full(
+                (seq_len, ), 
+                self.patch_vec, 
+                device=output.device, 
+                dtype=output.dtype
+            )
+        
+        if self.patch_vec.ndim != 1 or self.patch_vec.shape[0] != seq_len:
+            raise ValueError(f"Patch vector must be 1D with length {seq_len}, but got shape {self.patch_vec.shape}")
+        
+        # Reshapping our vector to be 3D to change our output 
+        if self.batch_index is None and self.feature_index is None:
+            patch_reshape = self.patch_vec.view(1, seq_len, 1)
+            output[:,:,:] = patch_reshape
 
-    elif self.batch_index is None: 
-        patch_reshape = self.patch_vec.view(1, seq_len)
-        output[:, :, self.feature_index] = patch_reshape
+        elif self.batch_index is None: 
+            patch_reshape = self.patch_vec.view(1, seq_len)
+            output[:, :, self.feature_index] = patch_reshape
 
-    elif self.feature_index is None:
-        patch_reshape = self.patch_vec.view(seq_len, 1)
-        output[self.batch_index, :, :] = patch_reshape
+        elif self.feature_index is None:
+            patch_reshape = self.patch_vec.view(seq_len, 1)
+            output[self.batch_index, :, :] = patch_reshape
 
-    else:
-        output[self.batch_index, :, self.feature_index] = self.patch_vec
-    
-    print(f"Patch Hook has patched the module. The output shape is: {output.shape}")
+        else:
+            output[self.batch_index, :, self.feature_index] = self.patch_vec
+        
+        print(f"Patch Hook has patched the module. The output shape is: {output.shape}")
 
-    return output
+        return output
     
         
 class ActivationExtractor:
@@ -417,58 +417,3 @@ class MMDiT(nn.Module):
 
         return output
 
-# ======================================================================
-# ========= TOY EXAMPLE FOR A SINGLE FORWARD PASS ======================
-# ======================================================================
-
-if __name__ == "__main__":
-    # 1. Define toy hyperparameters
-    BATCH_SIZE = 2
-    SEQ_LEN = 150       # Length of the audio sequence
-    TEXT_LEN = 50       # Length of the text sequence
-    MEL_DIM = 100       # Dimension of mel spectrogram features
-    MODEL_DIM = 256     # Internal dimension of the transformer
-    TEXT_EMBEDS = 256   # Vocabulary size for text
-
-    # 2. Instantiate the model with toy parameters
-    model = MMDiT(
-        dim=MODEL_DIM,
-        depth=4,            # A shallow model for a quick test
-        heads=4,
-        dim_head=64,
-        mel_dim=MEL_DIM,
-        text_num_embeds=TEXT_EMBEDS,
-    )
-
-    print(f"Model instantiated with dim={MODEL_DIM}")
-
-    # 3. Create dummy input tensors with the correct shapes and types
-    # (b, n, d) - Noised audio input
-    x = torch.randn(BATCH_SIZE, SEQ_LEN, MEL_DIM)
-    # (b, n, d) - Conditioning audio
-    cond = torch.randn(BATCH_SIZE, SEQ_LEN, MEL_DIM)
-    # (b, nt) - Text tokens (must be integers/longs for embedding)
-    text = torch.randint(0, TEXT_EMBEDS, (BATCH_SIZE, TEXT_LEN), dtype=torch.long)
-    # A single time step value for the whole batch
-    time = torch.tensor(0.5)
-
-    print("\n--- Input Shapes ---")
-    print(f"x (audio):    {x.shape}")
-    print(f"cond (audio): {cond.shape}")
-    print(f"text:         {text.shape}")
-    print(f"time:         {time.shape}")
-
-    # 4. Run a single forward pass
-    print("\nRunning a single forward pass...")
-    output = model(
-        x=x,
-        cond=cond,
-        text=text,
-        time=time
-    )
-    print("Forward pass successful!")
-
-    # 5. Check the output shape
-    print("\n--- Output Shape ---")
-    print(f"output:       {output.shape}")
-    print(f"Expected:     ({BATCH_SIZE}, {SEQ_LEN}, {MEL_DIM})")
