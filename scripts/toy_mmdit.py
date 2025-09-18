@@ -297,6 +297,11 @@ class MMDiT(nn.Module):
         # Initialize weights for certain layers
         self.initialize_weights()
 
+        # Added for patching extraction
+        self.extractor = ActivationExtractor()
+        self.hook_handles = []
+        self._register_extraction_hooks()
+
     def initialize_weights(self):
         """
         Custom weight initialization: zero out certain normalization and output layers.
@@ -357,6 +362,21 @@ class MMDiT(nn.Module):
         """
         self.text_cond, self.text_uncond = None, None
 
+    def register_extraction_hooks(self):
+        """
+        Registering our extraction hooks into MMDir
+        """
+        for name, module in self.named_modules():
+            if not isinstance(module, (nn.ModuleList, nn.Sequential)):
+                handle = module.register_forward_hook(self.extractor.add_layer(name))
+                self.hook_handles.append(handle)
+        print("Registered Module")
+
+    def clear_hooks(self):
+        for handle in self.hook_handles:
+            handle.remove()
+        print("Removed all hooks")
+
     def forward(
         self,
         x: float["b n d"],  # Noised input audio (batch, seq_len, dim)
@@ -384,6 +404,9 @@ class MMDiT(nn.Module):
         Returns:
             output: Predicted mel spectrogram or features
         """
+        # Remove previous processes of our MMDit per forward pass
+        self.extractor.clear()
+
         batch = x.shape[0]  # Batch size
         if time.ndim == 0:
             time = time.repeat(batch)  # Expand scalar time to batch size
@@ -416,4 +439,3 @@ class MMDiT(nn.Module):
         output = self.proj_out(x)
 
         return output
-
