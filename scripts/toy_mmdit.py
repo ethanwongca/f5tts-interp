@@ -27,7 +27,77 @@ from f5_tts.model.modules import (
 )
 
 
+# ---------------------------------------
+# PATCHING HOOK CLASS MMDIT (Code for MI)
+# --------------------------------------
+class FeaturePatchHook:
+    """
+    Creates a PyTorch forward hook that can patch any particular feature, for a particular batch in the MMDIT class
+    """
+    def __init__(
+        self, 
+        batch_index:int | None = None, 
+        feature_index: int | None = None, 
+        patch_vec: torch.Tensor | float = 0.0
+    ):
+    """
+    Initializes our patch hook parameters. 
 
+    Args:
+        batch_index (int | None): Index of batch to modify, if None all batches
+        feature_index (int | None): Index of feature to modify, if None all features
+        patch_vector (torch.tensor | floar): A torch vector size (seq_len,), or a float to fill with
+    """
+    self.batch_index = batch_index
+    self.feature_index = feature_index
+    self.patch_vec = patch_vec
+
+    # Where we call our patch hook 
+    def __call__(self, module, input, output) -> torch.Tensor:
+    """
+    Calling our forward hook for our particular feature 
+    Args:
+        module: This call upon our particular PyTorch layer 
+        input: This is the input value into the module 
+        output: This is the output value from our module and what we are trying to modify 
+
+    Output:
+        Pytorch.Tensor: This is our change tensor 
+    """
+    
+    batch_size, seq_len, feature_size = output.size()
+    
+    if isinstance(self.patch_vec, float):
+        self.patch_vec = torch.full(
+            (seq_len, ), 
+            self.patch_vec, 
+            device=output.device, 
+            dtype=output.dtype
+        )
+    
+    if self.patch_vec.ndim != 1 or self.patch_vec.shape[0] != seq_len:
+        raise ValueError(f"Patch vector must be 1D with length {seq_len}, but got shape {self.patch_vec.shape}")
+    
+    # Reshapping our vector to be 3D to change our output 
+    if self.batch_index is None and self.feature_index is None:
+        patch_reshape = self.patch_vec.view(1, seq_len, 1)
+        output[:,:,:] = patch_reshape
+
+    elif self.batch_index is None: 
+        patch_reshape = self.patch_vec.view(1, seq_len)
+        output[:, :, self.feature_index] = patch_reshape
+
+    elif self.feature_index is None:
+        patch_reshape = self.patch_vec.view(seq_len, 1)
+        output[self.batch_index, :, :] = patch_reshape
+
+    else:
+        output[self.batch_index, :, self.feature_index] = self.patch_vec
+    
+    print("Patch Hook has patched the module the output is: {output}")
+
+    return output
+    
         
 
 # class BatchFeaturePatchHook:
