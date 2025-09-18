@@ -94,14 +94,58 @@ class FeaturePatchHook:
     else:
         output[self.batch_index, :, self.feature_index] = self.patch_vec
     
-    print("Patch Hook has patched the module the output is: {output}")
+    print(f"Patch Hook has patched the module. The output shape is: {output.shape}")
 
     return output
     
         
+class ActivationExtractor:
+    """
+    Stores layer outputs from a PyTorch model during a forward pass
+    """
+    def __init__(self):
+        """ Initializes storage dictionary """
+        self.storage: dict[str, dict[str, torch.Tensor | torch.device]] = {}
 
-# class BatchFeaturePatchHook:
+    def add_layer(self, layer_name: str):
+        """
+        Creates and returns a hook function for a specific layer.
 
+        Args:
+            layer_name (str): The name to use as a key for storing the activation.
+        
+        Returns:
+            A hook function that can be registered with a PyTorch module.
+        """
+        def extraction_hook(module, input, output):
+            self.storage[layer_name] = {
+                'tensor': output.detach().cpu(),
+                'device': output.device
+            }
+
+        return extraction_hook
+
+    def clear(self):
+        """ Clears the activation layer for our extractor """
+        self.storage = {}
+    
+    def __str__(self):
+        """Prints a summary of the captured activations."""
+        report = "--- Captured Activations ---\n"
+        if not self.storage:
+            report += "  (No activations captured yet)\n"
+        else:
+            for name, values in self.storage.items():
+                tensor = values['tensor']
+                report += (
+                    f"  - Layer '{name}':\t"
+                    f"Shape={list(tensor.shape)}, "
+                    f"Device='{values['device']}', "
+                    f"Mean={tensor.mean():.2f}, "
+                    f"Tensor = {values['tensor']}\n"
+                )
+        report += "----------------------------"
+        return report
 
 
 """
