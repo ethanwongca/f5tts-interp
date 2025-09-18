@@ -8,6 +8,36 @@ Patch linear layer (1) as all 0s, ReLu is max(x, 0) applied element-wise
 import torch
 import torch.nn as nn
 
+class PatchVectorTensor:
+    def __init__(self, feature_number: int, patch_vector = None):
+        """
+        Initializes our patching token! 
+        Args:
+            feature_number: selects the particular feature in our tensor we want to patch 
+            patch_vector: selects what we want to replace feature with
+        """
+        self.feature_number = feature_number 
+        self.patch_vector = patch_vector 
+
+    def __call__(self, module, input, output):
+        """
+        Calls our patch hook 
+        Args:
+            module: particular layer our hook is placed 
+            input: input into this layer
+            output: output to this layer 
+        """
+        # Assumes a 2-D Tensor 
+        n, m = output.size() 
+
+        if self.patch_vector is None:
+            self.patch_vector = torch.zeros(n)
+
+        output[:, self.feature_number] = self.patch_vector
+
+        return output
+
+
 # 1. Define a simple neural network class
 class ToyModel(nn.Module):
     def __init__(self):
@@ -48,16 +78,22 @@ def hook_fn(module, input, output):
         }
 
 def patch_hook(module, input, output):
+    '''
+    Inputs:
+        Module: The layer (i.e. Conv2D etc)
+        Input: Inputs passed into the layer's forward method 
+        Output: Output of the layer's method 
+    '''
     print("\n[Patch Hook] Original linear1 output:", output)
     # Example: zero out the activation
     patched = torch.zeros_like(output)
     print("[Patch Hook] Patched linear1 output:", patched)
     return patched  # This will replace the output of linear1
 
-
+patch_hook_new = PatchVectorTensor(0)
 # 6. Register the hook to linear1
 hook_handle = model.linear1.register_forward_hook(hook_fn)
-patch_handle = model.linear1.register_forward_hook(patch_hook)
+patch_handle = model.linear1.register_forward_hook(patch_hook_new)
 hook_handle2 = model.relu.register_forward_hook(hook_fn)
 
 # 7. Run the model on the input
