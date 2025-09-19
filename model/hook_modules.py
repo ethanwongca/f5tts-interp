@@ -45,7 +45,7 @@ class FeaturePatchHook:
         self, 
         batch_index:int | None = None, 
         feature_index: int | None = None, 
-        output_index: int | None = None,
+        output_index: int  = 0,
         patch_vec: torch.Tensor | float = 0.0
     ):
         """
@@ -58,22 +58,55 @@ class FeaturePatchHook:
         """
         self.batch_index = batch_index
         self.feature_index = feature_index
+        self.output_index = output_index
         self.patch_vec = patch_vec
 
-    # Where we call our patch hook 
+    # Where we call our patch hook
     def __call__(self, module, input, output) -> torch.Tensor:
         """
-        Calling our forward hook for our particular feature 
+        Calling our forward hook for our particular feature
         Args:
-            module: This call upon our particular PyTorch layer 
-            input: This is the input value into the module 
-            output: This is the output value from our module and what we are trying to modify 
+            module: This call upon our particular PyTorch layer
+            input: This is the input value into the module
+            output: This is the output value from our module and what we are trying to modify
 
         Output:
-            Pytorch.Tensor: This is our change tensor 
+            Pytorch.Tensor: This is our change tensor
         """
+        # --- Step 1: Identify the target tensor we need to modify ---
+        is_tuple = isinstance(output, tuple)
+
+        if is_tuple:
+            if self.output_index >= len(output):
+                raise IndexError(f"output_index {self.output_index} is out of bounds for tuple of size {len(output)}")
+            target_tensor = output[self.output_index]
+        else:
+            target_tensor = output
+
+        # --- Step 2: Modify the target tensor by calling the correct helper ---
+        if target_tensor.ndim == 3:
+            patched_tensor = self.forward_path_three_dimensions(target_tensor)
+        elif target_tensor.ndim == 2:
+            patched_tensor = self.forward_path_two_dimensions(target_tensor)
+        else:
+            # If the tensor is not 2D or 3D, we don't know how to patch it.
+            print(f"Warning: Hook not applied. Tensor has unhandled dimension: {target_tensor.ndim}")
+            return output  # Return the original, unmodified output
+
+        # --- Step 3: Return the final output in the correct original format ---
+        # PyTorch hook functions require the same output type and shape that we had before.
+        if is_tuple:
+            # If the original was a tuple, we must put our patched tensor back into a new tuple.
+            output_list = list(output)
+            output_list[self.output_index] = patched_tensor
+            return tuple(output_list)
+        else:
+            # If the original was a single tensor, we return our single patched tensor.
+            return patched_tensor
         
-        batch_size, seq_len, feature_size = output.size()
+        
+    def forward_path_three_dimensions(self, target_tensor: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, feature_size = target_tensor.size()
         
         if isinstance(self.patch_vec, float):
             self.patch_vec = torch.full(
@@ -89,25 +122,40 @@ class FeaturePatchHook:
         # Reshapping our vector to be 3D to change our output 
         if self.batch_index is None and self.feature_index is None:
             patch_reshape = self.patch_vec.view(1, seq_len, 1)
-            output[:,:,:] = patch_reshape
+            target_tensor[:,:,:] = patch_reshape
 
         elif self.batch_index is None: 
             patch_reshape = self.patch_vec.view(1, seq_len)
-            output[:, :, self.feature_index] = patch_reshape
+            target_tensor[:, :, self.feature_index] = patch_reshape
 
         elif self.feature_index is None:
             patch_reshape = self.patch_vec.view(seq_len, 1)
-            output[self.batch_index, :, :] = patch_reshape
+            target_tensor[self.batch_index, :, :] = patch_reshape
 
         else:
             output[self.batch_index, :, self.feature_index] = self.patch_vec
         
         print(f"Patch Hook has patched the module. The output shape is: {output.shape}")
 
-        return output
+        return target_tensor
     
-        
+    def forward_path_two_dimensions(self, target_tensor: torch.Tensor) -> torch.Tensor:
+        # Reshapping our vector to be 3D to change our output 
+        if self.batch_index is None and self.feature_index is None:
+            target_tensor[:,:] = self.patch_vec
 
+        elif self.batch_index is None: 
+            target_tensor[:, self.feature_index] = self.patch_vec
+
+        elif self.feature_index is None:
+            target_tensor[self.batch_index,:] = self.patch_vec
+
+        else:
+            target_tensor[self.batch_index, self.feature_index] = self.patch_vec
+        
+        print(f"Patch Hook has patched the module. The output shape is: {target_tensor.shape}")
+
+        return target_tensor
 
 
 def get_bigvgan_mel_spectrogram(

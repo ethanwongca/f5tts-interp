@@ -300,7 +300,7 @@ class MMDiT(nn.Module):
         # Added for patching extraction
         self.extractor = ActivationExtractor()
         self.hook_handles = []
-        self._register_extraction_hooks()
+        self.register_extraction_hooks()
 
     def initialize_weights(self):
         """
@@ -439,3 +439,37 @@ class MMDiT(nn.Module):
         output = self.proj_out(x)
 
         return output
+
+if __name__ == "__main__":
+    # 1. Define toy hyperparameters
+    BATCH_SIZE, SEQ_LEN, TEXT_LEN, MEL_DIM, MODEL_DIM, TEXT_EMBEDS = 2, 5, 4, 8, 16, 20
+    
+    # 2. Instantiate the modified model.
+    #    It will automatically print that it has registered its own hooks.
+    model = MMDiT(dim=MODEL_DIM, depth=2, heads=2, dim_head=8, mel_dim=MEL_DIM, text_num_embeds=TEXT_EMBEDS)
+    
+    # 3. (Optional) Set up an EXTERNAL patch hook for a specific experiment
+    #    This demonstrates how you can still apply targeted patches externally.
+    final_layer_patch = FeaturePatchHook(feature_index=2, patch_vec=-99.9)
+    patch_handle = model.proj_out.register_forward_hook(final_layer_patch)
+    print(f"✅ External PatchHook registered on 'model.proj_out'.")
+    
+    # 4. Create dummy input tensors
+    x = torch.randn(BATCH_SIZE, SEQ_LEN, MEL_DIM)
+    cond = torch.randn(BATCH_SIZE, SEQ_LEN, MEL_DIM)
+    text = torch.randint(0, TEXT_EMBEDS, (BATCH_SIZE, TEXT_LEN), dtype=torch.long)
+    time = torch.tensor(0.5)
+
+    # 5. Run a single forward pass.
+    #    The model will automatically collect all its activations internally.
+    print("\n--- Running forward pass ---")
+    output = model(x=x, cond=cond, text=text, time=time)
+    print("✅ Forward pass successful!")
+
+    # 6. Access the activations directly from the model's internal extractor
+    #    and print them using the __str__ method.
+    print("\n" + str(model.extractor))
+
+    # 7. Clean up all hooks
+    model.clear_hooks() # Clears the internal hooks
+    patch_handle.remove() # Clears the external patch hook

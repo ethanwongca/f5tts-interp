@@ -9,106 +9,104 @@ import torch
 import torch.nn as nn
 
 class PatchVectorTensor:
-    def __init__(self, feature_number: int, patch_vector = None):
+    def __init__(self, feature_number: int, patch_vector=None):
         """
-        Initializes our patching token! 
         Args:
-            feature_number: selects the particular feature in our tensor we want to patch 
-            patch_vector: selects what we want to replace feature with
+            feature_number: which feature (dimension) to patch
+            patch_vector: replacement values (defaults to zeros)
         """
-        self.feature_number = feature_number 
-        self.patch_vector = patch_vector 
+        self.feature_number = feature_number
+        self.patch_vector = patch_vector
 
     def __call__(self, module, input, output):
         """
-        Calls our patch hook 
-        Args:
-            module: particular layer our hook is placed 
-            input: input into this layer
-            output: output to this layer 
+        Works for both plain tensors and LSTM outputs (tuple).
         """
-        # Assumes a 2-D Tensor 
-        n, m = output.size() 
+        if isinstance(output, tuple):
+            # Handle LSTM: (out, (h_n, c_n))
+            out, (h_n, c_n) = output
 
-        if self.patch_vector is None:
-            self.patch_vector = torch.zeros(n)
+            # patch 'out' along the last dimension
+            n, s, m = out.size()
+            if self.patch_vector is None:
+                self.patch_vector = torch.zeros(n, s, device=out.device)
+            out_patched = out.clone()
+            out_patched[:, :, self.feature_number] = self.patch_vector
 
-        output[:, self.feature_number] = self.patch_vector
+            print(f"[Patch Hook] Patched feature {self.feature_number} in LSTM output")
+            return out_patched, (h_n, c_n)
+        else:
+            # Handle simple 2D tensor (like Linear output)
+            n, m = output.size()
+            if self.patch_vector is None:
+                self.patch_vector = torch.zeros(n, device=output.device)
+            patched = output.clone()
+            patched[:, self.feature_number] = self.patch_vector
+            print(f"[Patch Hook] Patched feature {self.feature_number} in {module.__class__.__name__}")
+            return patched
 
-        return output
 
-
-# 1. Define a simple neural network class
+# Toy model with LSTM added
 class ToyModel(nn.Module):
     def __init__(self):
         super().__init__()
-        self.linear1 = nn.Linear(10, 20)  # Layer 1: Linear (input 10, output 20)
-        self.relu = nn.ReLU()             # Activation: ReLU
-        self.linear2 = nn.Linear(20, 5)   # Layer 2: Linear (input 20, output 5)
+        self.linear1 = nn.Linear(10, 20)
+        self.relu = nn.ReLU()
+        self.linear2 = nn.Linear(20, 5)
+        self.rnn = nn.LSTM(input_size=5, hidden_size=8, batch_first=True)
 
     def forward(self, x):
-        x = self.linear1(x)  # Pass input through first linear layer
-        x = self.relu(x)     # Apply ReLU activation
-        x = self.linear2(x)  # Pass through second linear layer
-        return x             # Output
+        x = self.linear1(x)
+        x = self.relu(x)
+        x = self.linear2(x)
 
-# 2. Create an instance of the model
+        # Expand to 3D for LSTM
+        x = x.unsqueeze(1)  # (batch, seq_len=1, features=5)
+        out, (h_n, c_n) = self.rnn(x)
+        return out, (h_n, c_n)
+
+
+# Instantiate model
 model = ToyModel()
 
-# 3. Prepare a random input tensor (batch size 1, 10 features)
+# Example input
 x = torch.randn(1, 10)
 
-# 4. Set up a dictionary to store activations
+# Activation store
 activations = {}
 
-# 5. Define a hook function to capture the output of linear1
-#    The hook function takes three arguments: module, input, output
-#    We store the output (activation) in the activations dictionary
-
 def hook_fn(module, input, output):
-    if isinstance(module, nn.Linear):
-        activations['linear1'] = {
-            'tensor': output.detach().cpu(),
-            'device': output.device
-        }
-    elif isinstance (module, nn.ReLU):
-        activations['relu'] = {
-            'tensor': output.detach().cpu(),
-            'device': output.device
-        }
+    if isinstance(output, tuple):
+        activations[module.__class__.__name__] = [o.detach().cpu() for o in (output[0], *output[1])]
+    else:
+        activations[module.__class__.__name__] = output.detach().cpu()
 
-def patch_hook(module, input, output):
-    '''
-    Inputs:
-        Module: The layer (i.e. Conv2D etc)
-        Input: Inputs passed into the layer's forward method 
-        Output: Output of the layer's method 
-    '''
-    print("\n[Patch Hook] Original linear1 output:", output)
-    # Example: zero out the activation
-    patched = torch.zeros_like(output)
-    print("[Patch Hook] Patched linear1 output:", patched)
-    return patched  # This will replace the output of linear1
+# Register hooks
+hook_lin = model.linear1.register_forward_hook(hook_fn)
+patch_lin = model.linear1.register_forward_hook(PatchVectorTensor(0))  # patch feature 0 of linear1
+hook_relu = model.relu.register_forward_hook(hook_fn)
+hook_rnn = model.rnn.register_forward_hook(hook_fn)
+patch_rnn = model.rnn.register_forward_hook(PatchVectorTensor(5))      # patch feature 1 of LSTM output
 
-patch_hook_new = PatchVectorTensor(0)
-# 6. Register the hook to linear1
-hook_handle = model.linear1.register_forward_hook(hook_fn)
-patch_handle = model.linear1.register_forward_hook(patch_hook_new)
-hook_handle2 = model.relu.register_forward_hook(hook_fn)
+# Forward pass
+out, (h_n, c_n) = model(x)
 
-# 7. Run the model on the input
-output = model(x)
+# Print results
+print("\n=== Final Model Output ===")
+print("out:", out)
+print("h_n:", h_n)
+print("c_n:", c_n)
 
-# 8. Print the output of the model
-print("Model output:", output)
+print("\n=== Captured Activations ===")
+for k, v in activations.items():
+    if isinstance(v, list):
+        print([t for t in v])
+    else:
+        print(v)
 
-# 9. Print the captured activations from linear1
-print("Activations from linear1:", activations['linear1'])
-print("Activations from linear1 tensor shape:", activations['linear1']['tensor'].shape)
-print("Activations from relu:", activations['relu'])
-print("Activations from relu tensor shape:", activations['relu']['tensor'].shape)
-
-# 10. Remove the hook (good practice to avoid side effects)
-hook_handle.remove() 
-patch_handle.remove()
-hook_handle2.remove()
+# Cleanup
+hook_lin.remove()
+patch_lin.remove()
+hook_relu.remove()
+hook_rnn.remove()
+patch_rnn.remove()
