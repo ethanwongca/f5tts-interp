@@ -73,7 +73,7 @@ class FeaturePatchHook:
         Output:
             Pytorch.Tensor: This is our change tensor
         """
-        # --- Step 1: Identify the target tensor we need to modify ---
+        # Step 1: Identify the target tensor we need to modify
         is_tuple = isinstance(output, tuple)
 
         if is_tuple:
@@ -83,7 +83,7 @@ class FeaturePatchHook:
         else:
             target_tensor = output
 
-        # --- Step 2: Modify the target tensor by calling the correct helper ---
+        # -Step 2: Modify the target tensor by calling the correct helper
         if target_tensor.ndim == 3:
             patched_tensor = self.forward_path_three_dimensions(target_tensor)
         elif target_tensor.ndim == 2:
@@ -93,7 +93,7 @@ class FeaturePatchHook:
             print(f"Warning: Hook not applied. Tensor has unhandled dimension: {target_tensor.ndim}")
             return output  # Return the original, unmodified output
 
-        # --- Step 3: Return the final output in the correct original format ---
+        # Step 3: Return the final output in the correct original format 
         # PyTorch hook functions require the same output type and shape that we had before.
         if is_tuple:
             # If the original was a tuple, we must put our patched tensor back into a new tuple.
