@@ -309,7 +309,7 @@ class MMDiT(nn.Module):
         hook = FeatureExtractionHook(storage=self.extracted_activations, name=hook_name, output_index=output_index)
         handle = submodule.register_forward_hook(hook)
         self.hook_handles[hook_name] = handle
-        print(f"✅ Added extraction hook '{hook_name}' to '{submodule_path}'.")
+        print(f"Added extraction hook '{hook_name}' to '{submodule_path}'.")
 
     def add_patch_hook(self, submodule_path: str, hook_name: str, **patch_kwargs):
         """Attaches a feature patching hook to a submodule using its path."""
@@ -383,3 +383,4 @@ class MMDiT(nn.Module):
         x = self.norm_out(x, t)
         output = self.proj_out(x)
         return output
+
