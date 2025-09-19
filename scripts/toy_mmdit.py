@@ -326,7 +326,7 @@ class MMDiT(nn.Module):
         hook = FeaturePatchHook(**patch_kwargs)
         handle = submodule.register_forward_hook(hook)
         self.hook_handles[hook_name] = handle
-        print(f"✅ Added patch hook '{hook_name}' to '{submodule_path}'.")
+        print(f"Added patch hook '{hook_name}' to '{submodule_path}'.")
 
     def remove_hooks(self):
         """Removes all attached hooks."""
@@ -383,49 +383,3 @@ class MMDiT(nn.Module):
         x = self.norm_out(x, t)
         output = self.proj_out(x)
         return output
-
-if __name__ == "__main__":
-    # 1. Define toy hyperparameters
-    BATCH_SIZE, SEQ_LEN, TEXT_LEN, MEL_DIM, MODEL_DIM, TEXT_EMBEDS = 2, 5, 4, 8, 16, 20
-    
-    # 2. Instantiate the new, integrated model
-    model = MMDiT(dim=MODEL_DIM, depth=2, heads=2, dim_head=8, mel_dim=MEL_DIM, text_num_embeds=TEXT_EMBEDS)
-    
-    # 3. Add hooks using the model's own methods
-    #    This is much cleaner than managing external hooks.
-    #    Note: This shows how to access a nested module.
-    model.add_extraction_hook(
-        submodule_path='transformer_blocks.0.attn', 
-        hook_name='block0_attn_output_x',
-        output_index=0 # Extract the 'x' tensor from the attention tuple
-    )
-    
-    model.add_patch_hook(
-        submodule_path='proj_out',
-        hook_name='patch_final_layer',
-        feature_index=2, # Patch the 3rd feature column
-        patch_vec=-99.9  # With this value
-    )
-
-    # 4. Create dummy input tensors
-    x = torch.randn(BATCH_SIZE, SEQ_LEN, MEL_DIM)
-    cond = torch.randn(BATCH_SIZE, SEQ_LEN, MEL_DIM)
-    text = torch.randint(0, TEXT_EMBEDS, (BATCH_SIZE, TEXT_LEN), dtype=torch.long)
-    time = torch.tensor(0.5)
-
-    # 5. Run a single forward pass
-    print("\n--- Running forward pass ---")
-    output = model(x=x, cond=cond, text=text, time=time)
-    print("✅ Forward pass successful!")
-
-    # 6. Access and print the activations using the model's new __str__ method
-    print("\n" + str(model))
-
-    # 7. Verify that the patch was applied
-    patched_feature_column = output[:, :, 2]
-    patch_was_successful = torch.all(patched_feature_column == -99.9).item()
-    print(f"\nPatch successful: {patch_was_successful}")
-    assert patch_was_successful
-
-    # 8. Clean up all hooks when you're done
-    model.remove_hooks()
