@@ -10,152 +10,119 @@ d - dimension
 # Import future annotations for type hinting compatibility (Python 3.7+)
 from __future__ import annotations
 
-# Import torch and neural network modules
+# Import standard libraries and PyTorch modules
+import math
 import torch
 from torch import nn
-# Import RotaryEmbedding from x_transformers for rotary positional encoding
 from x_transformers.x_transformers import RotaryEmbedding
 
 # Import various modules and layers from the F5-TTS codebase
 from f5_tts.model.modules import (
-    AdaLayerNorm_Final,           # Adaptive LayerNorm for final output
-    ConvPositionEmbedding,        # Convolutional positional embedding for audio
-    MMDiTBlock,                   # The main transformer block used in this model
-    TimestepEmbedding,            # Embedding for time step conditioning
-    get_pos_embed_indices,        # Helper for position embedding indices
-    precompute_freqs_cis,         # Helper for precomputing sinusoidal frequencies
+    AdaLayerNorm_Final,
+    ConvPositionEmbedding,
+    MMDiTBlock,
+    TimestepEmbedding,
+    get_pos_embed_indices,
+    precompute_freqs_cis,
 )
 
-
 # ---------------------------------------
-# PATCHING HOOK CLASS MMDIT (Code for MI)
+# HOOK CLASSES (External Logic)
 # --------------------------------------
+
+class FeatureExtractionHook:
+    """
+    Creates a PyTorch forward hook that can extract any particular feature from a module's output.
+    """
+    def __init__(self, storage: dict, name: str, output_index: int = 0):
+        self.storage = storage
+        self.name = name
+        self.output_index = output_index
+
+    def __call__(self, module, input, output):
+        is_tuple = isinstance(output, tuple)
+        if is_tuple:
+            if self.output_index >= len(output):
+                print(f"Warning: Hook '{self.name}' failed. output_index is out of bounds.")
+                return
+            target_tensor = output[self.output_index]
+        else:
+            target_tensor = output
+
+        self.storage[self.name] = {
+            'tensor': target_tensor.clone().detach().cpu(),
+            'device': target_tensor.device,
+            'shape': target_tensor.shape
+        }
+        print(f"--- Feature Extracted: '{self.name}' from module '{module.__class__.__name__}' ---")
+
+
 class FeaturePatchHook:
     """
-    Creates a PyTorch forward hook that can patch any particular feature, for a particular batch in the MMDIT class
+    Creates a PyTorch forward hook that can patch any particular feature, for a particular batch.
     """
-    def __init__(
-        self, 
-        batch_index:int | None = None, 
-        feature_index: int | None = None, 
-        patch_vec: torch.Tensor | float = 0.0
-    ):
-        """
-        Initializes our patch hook parameters. 
-
-        Args:
-            batch_index (int | None): Index of batch to modify, if None all batches
-            feature_index (int | None): Index of feature to modify, if None all features
-            patch_vector (torch.tensor | floar): A torch vector size (seq_len,), or a float to fill with
-        """
+    def __init__(self, batch_index: int | None = None, feature_index: int | None = None, output_index: int = 0, patch_vec: torch.Tensor | float = 0.0):
         self.batch_index = batch_index
         self.feature_index = feature_index
+        self.output_index = output_index
         self.patch_vec = patch_vec
 
-    # Where we call our patch hook 
     def __call__(self, module, input, output) -> torch.Tensor:
-        """
-        Calling our forward hook for our particular feature 
-        Args:
-            module: This call upon our particular PyTorch layer 
-            input: This is the input value into the module 
-            output: This is the output value from our module and what we are trying to modify 
+        is_tuple = isinstance(output, tuple)
+        if is_tuple:
+            if self.output_index >= len(output):
+                raise IndexError(f"output_index {self.output_index} is out of bounds for tuple of size {len(output)}")
+            target_tensor = output[self.output_index]
+        else:
+            target_tensor = output
 
-        Output:
-            Pytorch.Tensor: This is our change tensor 
-        """
-        
-        batch_size, seq_len, feature_size = output.size()
-        
+        if target_tensor.ndim == 3:
+            patched_tensor = self.forward_path_three_dimensions(target_tensor)
+        elif target_tensor.ndim == 2:
+            patched_tensor = self.forward_path_two_dimensions(target_tensor)
+        else:
+            print(f"Warning: Hook not applied. Unhandled dimension: {target_tensor.ndim}")
+            return output
+
+        if is_tuple:
+            output_list = list(output)
+            output_list[self.output_index] = patched_tensor
+            return tuple(output_list)
+        else:
+            return patched_tensor
+
+    def forward_path_three_dimensions(self, target_tensor: torch.Tensor) -> torch.Tensor:
+        _batch_size, seq_len, _feature_size = target_tensor.shape
         if isinstance(self.patch_vec, float):
-            self.patch_vec = torch.full(
-                (seq_len, ), 
-                self.patch_vec, 
-                device=output.device, 
-                dtype=output.dtype
-            )
-        
-        if self.patch_vec.ndim != 1 or self.patch_vec.shape[0] != seq_len:
-            raise ValueError(f"Patch vector must be 1D with length {seq_len}, but got shape {self.patch_vec.shape}")
-        
-        # Reshapping our vector to be 3D to change our output 
+            patch_tensor = torch.full((seq_len,), self.patch_vec, device=target_tensor.device, dtype=target_tensor.dtype)
+        else:
+            patch_tensor = self.patch_vec.to(target_tensor.device, target_tensor.dtype)
+
+        if patch_tensor.ndim != 1 or patch_tensor.shape[0] != seq_len:
+            raise ValueError(f"For 3D tensors, patch_vec must be float or 1D tensor of length {seq_len}")
+
         if self.batch_index is None and self.feature_index is None:
-            patch_reshape = self.patch_vec.view(1, seq_len, 1)
-            output[:,:,:] = patch_reshape
-
-        elif self.batch_index is None: 
-            patch_reshape = self.patch_vec.view(1, seq_len)
-            output[:, :, self.feature_index] = patch_reshape
-
+            target_tensor[:, :, :] = patch_tensor.view(1, seq_len, 1)
+        elif self.batch_index is None:
+            target_tensor[:, :, self.feature_index] = patch_tensor
         elif self.feature_index is None:
-            patch_reshape = self.patch_vec.view(seq_len, 1)
-            output[self.batch_index, :, :] = patch_reshape
-
+            target_tensor[self.batch_index, :, :] = patch_tensor.view(seq_len, 1)
         else:
-            output[self.batch_index, :, self.feature_index] = self.patch_vec
-        
-        print(f"Patch Hook has patched the module. The output shape is: {output.shape}")
+            target_tensor[self.batch_index, :, self.feature_index] = patch_tensor
+        return target_tensor
 
-        return output
-    
-        
-class ActivationExtractor:
-    """
-    Stores layer outputs from a PyTorch model during a forward pass
-    """
-    def __init__(self):
-        """ Initializes storage dictionary """
-        self.storage: dict[str, dict[str, torch.Tensor | torch.device]] = {}
-
-    def add_layer(self, layer_name: str):
-        """
-        Creates and returns a hook function for a specific layer.
-
-        Args:
-            layer_name (str): The name to use as a key for storing the activation.
-        
-        Returns:
-            A hook function that can be registered with a PyTorch module.
-        """
-        def extraction_hook(module, input, output):
-            self.storage[layer_name] = {
-                'tensor': output.detach().cpu(),
-                'device': output.device
-            }
-
-        return extraction_hook
-
-    def clear(self):
-        """ Clears the activation layer for our extractor """
-        self.storage = {}
-    
-    def __str__(self):
-        """Prints a summary of the captured activations."""
-        report = "--- Captured Activations ---\n"
-        if not self.storage:
-            report += "  (No activations captured yet)\n"
+    def forward_path_two_dimensions(self, target_tensor: torch.Tensor) -> torch.Tensor:
+        if self.batch_index is None and self.feature_index is None:
+            target_tensor[:, :] = self.patch_vec
+        elif self.batch_index is None:
+            target_tensor[:, self.feature_index] = self.patch_vec
+        elif self.feature_index is None:
+            target_tensor[self.batch_index, :] = self.patch_vec
         else:
-            for name, values in self.storage.items():
-                tensor = values['tensor']
-                report += (
-                    f"  - Layer '{name}':\t"
-                    f"Shape={list(tensor.shape)}, "
-                    f"Device='{values['device']}', "
-                    f"Mean={tensor.mean():.2f}, "
-                    f"Tensor = {values['tensor']}\n"
-                )
-        report += "----------------------------"
-        return report
+            target_tensor[self.batch_index, self.feature_index] = self.patch_vec
+        return target_tensor
 
-
-"""
-From F5-TTS 
-"""
-
-# ----------------------
-# TEXT EMBEDDING MODULE
-# ----------------------
-
+# --- [TextEmbedding and AudioEmbedding classes would go here, unchanged] ---
 class TextEmbedding(nn.Module):
     """
     Embeds text tokens into a continuous vector space, adds sinusoidal positional encoding,
@@ -202,11 +169,7 @@ class TextEmbedding(nn.Module):
             text = text.masked_fill(text_mask.unsqueeze(-1).expand(-1, -1, text.size(-1)), 0.0)
 
         return text
-
-# ---------------------------------------------
-# AUDIO EMBEDDING MODULE (for input & cond audio)
-# ---------------------------------------------
-
+    
 class AudioEmbedding(nn.Module):
     """
     Embeds audio features (input and conditioning audio) into a continuous space,
@@ -236,13 +199,12 @@ class AudioEmbedding(nn.Module):
         return x
 
 # ---------------------------------------------------
-# MAIN TRANSFORMER BACKBONE USING MM-DiT BLOCKS
+# REFACTORED MMDiT CLASS WITH INTEGRATED HOOKS
 # ---------------------------------------------------
 
 class MMDiT(nn.Module):
     """
-    Multi-modal DiT (Diffusion Transformer) backbone for TTS.
-    Processes audio and text embeddings through a stack of MMDiTBlocks.
+    Multi-modal DiT backbone with integrated methods for feature extraction and patching.
     """
     def __init__(
         self,
@@ -260,21 +222,14 @@ class MMDiT(nn.Module):
     ):
         super().__init__()
 
-        # Time step embedding (for diffusion or temporal conditioning)
+        # --- Standard Model Layers ---
         self.time_embed = TimestepEmbedding(dim)
-        # Text embedding module
         self.text_embed = TextEmbedding(dim, text_num_embeds, mask_padding=text_mask_padding)
-        self.text_cond, self.text_uncond = None, None  # Caches for text embeddings (for efficiency)
-        # Audio embedding module
+        self.text_cond, self.text_uncond = None, None
         self.audio_embed = AudioEmbedding(mel_dim, dim)
-
-        # Rotary positional embedding for attention (used in transformer blocks)
         self.rotary_embed = RotaryEmbedding(dim_head)
-
-        self.dim = dim  # Model dimension
-        self.depth = depth  # Number of transformer blocks
-
-        # Stack of MMDiTBlocks (the main transformer layers)
+        self.dim = dim
+        self.depth = depth
         self.transformer_blocks = nn.ModuleList(
             [
                 MMDiTBlock(
@@ -283,64 +238,33 @@ class MMDiT(nn.Module):
                     dim_head=dim_head,
                     dropout=dropout,
                     ff_mult=ff_mult,
-                    context_pre_only=i == depth - 1,  # Only last block uses context_pre_only
+                    context_pre_only=i == depth - 1,
                     qk_norm=qk_norm,
                 )
                 for i in range(depth)
             ]
         )
-        # Final adaptive layer normalization
         self.norm_out = AdaLayerNorm_Final(dim)
-        # Final linear projection to mel spectrogram dimension
         self.proj_out = nn.Linear(dim, mel_dim)
-
-        # Initialize weights for certain layers
         self.initialize_weights()
 
-        # Added for patching extraction
-        self.extractor = ActivationExtractor()
-        self.hook_handles = []
-        self.register_extraction_hooks()
+        # --- Integrated Hook Management ---
+        self.hook_handles = {}
+        self.extracted_activations = {}
 
+    # --- [initialize_weights, get_input_embed, clear_cache methods are unchanged] ---
     def initialize_weights(self):
-        """
-        Custom weight initialization: zero out certain normalization and output layers.
-        """
-        # Zero-out AdaLN layers in each transformer block
         for block in self.transformer_blocks:
             nn.init.constant_(block.attn_norm_x.linear.weight, 0)
             nn.init.constant_(block.attn_norm_x.linear.bias, 0)
             nn.init.constant_(block.attn_norm_c.linear.weight, 0)
             nn.init.constant_(block.attn_norm_c.linear.bias, 0)
-
-        # Zero-out final normalization and output projection layers
         nn.init.constant_(self.norm_out.linear.weight, 0)
         nn.init.constant_(self.norm_out.linear.bias, 0)
         nn.init.constant_(self.proj_out.weight, 0)
         nn.init.constant_(self.proj_out.bias, 0)
 
-    def get_input_embed(
-        self,
-        x,  # b n d: input audio features
-        cond,  # b n d: conditioning audio features
-        text,  # b nt: text tokens
-        drop_audio_cond: bool = False,
-        drop_text: bool = False,
-        cache: bool = True,
-    ):
-        """
-        Computes and returns the audio and text embeddings, with optional caching for efficiency.
-        Args:
-            x: Input audio features
-            cond: Conditioning audio features
-            text: Text tokens
-            drop_audio_cond: If True, zero out cond audio
-            drop_text: If True, zero out text
-            cache: If True, cache text embeddings for reuse
-        Returns:
-            x: Embedded audio
-            c: Embedded text
-        """
+    def get_input_embed(self, x, cond, text, drop_audio_cond: bool = False, drop_text: bool = False, cache: bool = True):
         if cache:
             if drop_text:
                 if self.text_uncond is None:
@@ -353,123 +277,155 @@ class MMDiT(nn.Module):
         else:
             c = self.text_embed(text, drop_text=drop_text)
         x = self.audio_embed(x, cond, drop_audio_cond=drop_audio_cond)
-
         return x, c
 
     def clear_cache(self):
-        """
-        Clears cached text embeddings (for when input text changes).
-        """
         self.text_cond, self.text_uncond = None, None
+        
+    # --- UPDATED Hook Management Methods ---
 
-    def register_extraction_hooks(self):
-        """
-        Registering our extraction hooks into MMDir
-        """
-        for name, module in self.named_modules():
-            if not isinstance(module, (nn.ModuleList, nn.Sequential)):
-                handle = module.register_forward_hook(self.extractor.add_layer(name))
-                self.hook_handles.append(handle)
-        print("Registered Module")
+    def _get_submodule(self, path: str) -> nn.Module:
+        """Helper function to retrieve a submodule from a path string."""
+        module = self
+        for part in path.split('.'):
+            if part.isdigit():
+                module = module[int(part)]
+            else:
+                module = getattr(module, part)
+        return module
 
-    def clear_hooks(self):
-        for handle in self.hook_handles:
+    def add_extraction_hook(self, submodule_path: str, hook_name: str, output_index: int = 0):
+        """Attaches a feature extraction hook to a submodule using its path."""
+        if hook_name in self.hook_handles:
+            print(f"Warning: A hook with name '{hook_name}' already exists. Overwriting.")
+            self.hook_handles[hook_name].remove()
+
+        try:
+            submodule = self._get_submodule(submodule_path)
+        except (AttributeError, IndexError) as e:
+            print(f"Error finding submodule at path '{submodule_path}': {e}")
+            return
+
+        hook = FeatureExtractionHook(storage=self.extracted_activations, name=hook_name, output_index=output_index)
+        handle = submodule.register_forward_hook(hook)
+        self.hook_handles[hook_name] = handle
+        print(f"✅ Added extraction hook '{hook_name}' to '{submodule_path}'.")
+
+    def add_patch_hook(self, submodule_path: str, hook_name: str, **patch_kwargs):
+        """Attaches a feature patching hook to a submodule using its path."""
+        if hook_name in self.hook_handles:
+            print(f"Warning: A hook with name '{hook_name}' already exists. Overwriting.")
+            self.hook_handles[hook_name].remove()
+
+        try:
+            submodule = self._get_submodule(submodule_path)
+        except (AttributeError, IndexError) as e:
+            print(f"Error finding submodule at path '{submodule_path}': {e}")
+            return
+
+        hook = FeaturePatchHook(**patch_kwargs)
+        handle = submodule.register_forward_hook(hook)
+        self.hook_handles[hook_name] = handle
+        print(f"✅ Added patch hook '{hook_name}' to '{submodule_path}'.")
+
+    def remove_hooks(self):
+        """Removes all attached hooks."""
+        for name, handle in self.hook_handles.items():
             handle.remove()
-        print("Removed all hooks")
+        self.hook_handles = {}
+        print("Removed all hooks.")
 
-    def forward(
-        self,
-        x: float["b n d"],  # Noised input audio (batch, seq_len, dim)
-        cond: float["b n d"],  # Masked conditioning audio (batch, seq_len, dim)
-        text: int["b nt"],  # Text tokens (batch, text_seq_len)
-        time: float["b"] | float[""] ,  # Time step(s) for conditioning
-        mask: bool["b n"] | None = None,  # Optional mask for sequence positions
-        drop_audio_cond: bool = False,  # Whether to drop conditioning audio
-        drop_text: bool = False,        # Whether to drop text
-        cfg_infer: bool = False,        # If True, run classifier-free guidance inference
-        cache: bool = False,            # If True, cache text embeddings
-    ):
-        """
-        Forward pass for the MMDiT model.
-        Args:
-            x: Noised input audio
-            cond: Masked conditioning audio
-            text: Text tokens
-            time: Time step(s) for conditioning
-            mask: Optional mask for sequence positions
-            drop_audio_cond: Whether to drop conditioning audio
-            drop_text: Whether to drop text
-            cfg_infer: If True, run classifier-free guidance inference (pack cond & uncond)
-            cache: If True, cache text embeddings
-        Returns:
-            output: Predicted mel spectrogram or features
-        """
-        # Remove previous processes of our MMDit per forward pass
-        self.extractor.clear()
+    def clear_activations(self):
+        """Clears the dictionary of extracted activations."""
+        self.extracted_activations.clear()
 
-        batch = x.shape[0]  # Batch size
+    def __str__(self):
+        """Prints a summary of the captured activations."""
+        report = "--- Captured Activations ---\n"
+        if not self.extracted_activations:
+            report += "  (No activations captured yet)\n"
+        else:
+            for name, values in self.extracted_activations.items():
+                tensor = values['tensor']
+                report += (
+                    f"  - Hook '{name}':\t"
+                    f"Shape={values['shape']}, "
+                    f"Device='{values['device']}', "
+                    f"Mean={tensor.mean():.2f}\n"
+                )
+        report += "----------------------------"
+        return report
+
+    # --- [forward method is unchanged] ---
+    def forward(self, x, cond, text, time, mask=None, drop_audio_cond=False, drop_text=False, cfg_infer=False, cache=False):
+        self.clear_activations()
+        batch = x.shape[0]
         if time.ndim == 0:
-            time = time.repeat(batch)  # Expand scalar time to batch size
-
-        # Compute time embedding
+            time = time.repeat(batch)
         t = self.time_embed(time)
-        if cfg_infer:  # If doing classifier-free guidance, run both cond and uncond in parallel
+        if cfg_infer:
             x_cond, c_cond = self.get_input_embed(x, cond, text, drop_audio_cond=False, drop_text=False, cache=cache)
             x_uncond, c_uncond = self.get_input_embed(x, cond, text, drop_audio_cond=True, drop_text=True, cache=cache)
-            x = torch.cat((x_cond, x_uncond), dim=0)  # Concatenate along batch
+            x = torch.cat((x_cond, x_uncond), dim=0)
             c = torch.cat((c_cond, c_uncond), dim=0)
             t = torch.cat((t, t), dim=0)
             mask = torch.cat((mask, mask), dim=0) if mask is not None else None
         else:
-            x, c = self.get_input_embed(
-                x, cond, text, drop_audio_cond=drop_audio_cond, drop_text=drop_text, cache=cache
-            )
+            x, c = self.get_input_embed(x, cond, text, drop_audio_cond=drop_audio_cond, drop_text=drop_text, cache=cache)
 
-        seq_len = x.shape[1]      # Length of audio sequence
-        text_len = text.shape[1]  # Length of text sequence
-        rope_audio = self.rotary_embed.forward_from_seq_len(seq_len)  # Rotary embedding for audio
-        rope_text = self.rotary_embed.forward_from_seq_len(text_len)  # Rotary embedding for text
+        seq_len, text_len = x.shape[1], text.shape[1]
+        rope_audio = self.rotary_embed.forward_from_seq_len(seq_len)
+        rope_text = self.rotary_embed.forward_from_seq_len(text_len)
 
-        # Pass through each transformer block
         for block in self.transformer_blocks:
             c, x = block(x, c, t, mask=mask, rope=rope_audio, c_rope=rope_text)
 
-        # Final normalization and projection
         x = self.norm_out(x, t)
         output = self.proj_out(x)
-
         return output
 
 if __name__ == "__main__":
     # 1. Define toy hyperparameters
     BATCH_SIZE, SEQ_LEN, TEXT_LEN, MEL_DIM, MODEL_DIM, TEXT_EMBEDS = 2, 5, 4, 8, 16, 20
     
-    # 2. Instantiate the modified model.
-    #    It will automatically print that it has registered its own hooks.
+    # 2. Instantiate the new, integrated model
     model = MMDiT(dim=MODEL_DIM, depth=2, heads=2, dim_head=8, mel_dim=MEL_DIM, text_num_embeds=TEXT_EMBEDS)
     
-    # 3. (Optional) Set up an EXTERNAL patch hook for a specific experiment
-    #    This demonstrates how you can still apply targeted patches externally.
-    final_layer_patch = FeaturePatchHook(feature_index=2, patch_vec=-99.9)
-    patch_handle = model.proj_out.register_forward_hook(final_layer_patch)
-    print(f"✅ External PatchHook registered on 'model.proj_out'.")
+    # 3. Add hooks using the model's own methods
+    #    This is much cleaner than managing external hooks.
+    #    Note: This shows how to access a nested module.
+    model.add_extraction_hook(
+        submodule_path='transformer_blocks.0.attn', 
+        hook_name='block0_attn_output_x',
+        output_index=0 # Extract the 'x' tensor from the attention tuple
+    )
     
+    model.add_patch_hook(
+        submodule_path='proj_out',
+        hook_name='patch_final_layer',
+        feature_index=2, # Patch the 3rd feature column
+        patch_vec=-99.9  # With this value
+    )
+
     # 4. Create dummy input tensors
     x = torch.randn(BATCH_SIZE, SEQ_LEN, MEL_DIM)
     cond = torch.randn(BATCH_SIZE, SEQ_LEN, MEL_DIM)
     text = torch.randint(0, TEXT_EMBEDS, (BATCH_SIZE, TEXT_LEN), dtype=torch.long)
     time = torch.tensor(0.5)
 
-    # 5. Run a single forward pass.
-    #    The model will automatically collect all its activations internally.
+    # 5. Run a single forward pass
     print("\n--- Running forward pass ---")
     output = model(x=x, cond=cond, text=text, time=time)
     print("✅ Forward pass successful!")
 
-    # 6. Access the activations directly from the model's internal extractor
-    #    and print them using the __str__ method.
-    print("\n" + str(model.extractor))
+    # 6. Access and print the activations using the model's new __str__ method
+    print("\n" + str(model))
 
-    # 7. Clean up all hooks
-    model.clear_hooks() # Clears the internal hooks
-    patch_handle.remove() # Clears the external patch hook
+    # 7. Verify that the patch was applied
+    patched_feature_column = output[:, :, 2]
+    patch_was_successful = torch.all(patched_feature_column == -99.9).item()
+    print(f"\nPatch successful: {patch_was_successful}")
+    assert patch_was_successful
+
+    # 8. Clean up all hooks when you're done
+    model.remove_hooks()
