@@ -37,6 +37,60 @@ hann_window_cache = {}
 # OUR IMPLEMENTATION PATCH HOOKS
 # ------------------------------
 
+class FeatureExtractionHook:
+    """
+    Creates a PyTorch forward hook that can extract any particular feature from a module's output.
+    """
+    def __init__(
+        self,
+        storage: dict,
+        name: str,
+        output_index: int = 0
+    ):
+        """
+        Initializes our extraction hook parameters.
+
+        Args:
+            storage (dict): The dictionary where extracted features will be stored.
+            name (str): A unique name to use as the key in the storage dictionary.
+            output_index (int): The index of the tensor to extract if the module returns a tuple.
+        """
+        self.storage = storage
+        self.name = name
+        self.output_index = output_index
+
+    # Where we call our extraction hook
+    def __call__(self, module, input, output):
+        """
+        Calling our forward hook for our particular feature.
+        This hook does NOT modify the output.
+
+        Args:
+            module: This call upon our particular PyTorch layer.
+            input: This is the input value into the module.
+            output: This is the output value from our module and what we are extracting.
+        """
+        # --- Step 1: Identify the target tensor we want to extract ---
+        is_tuple = isinstance(output, tuple)
+
+        if is_tuple:
+            if self.output_index >= len(output):
+                print(f"Warning: Hook '{self.name}' failed. output_index is out of bounds.")
+                return # Exit without doing anything
+            target_tensor = output[self.output_index]
+        else:
+            target_tensor = output
+
+        # --- Step 2: Store the extracted information in the desired format ---
+        self.storage[self.name] = {
+            'tensor': target_tensor.clone().detach().cpu(), # Store a detached copy on the CPU
+            'device': target_tensor.device,
+            'shape': target_tensor.shape
+        }
+
+        print(f"--- Feature Extracted: '{self.name}' from module '{module.__class__.__name__}' ---")
+
+
 class FeaturePatchHook:
     """
     Creates a PyTorch forward hook that can patch any particular feature, for a particular batch in the MMDIT class
@@ -1092,23 +1146,3 @@ class MMDiTBlock(nn.Module):
         x = x + x_gate_mlp.unsqueeze(1) * x_ff_output  # (b, n, d)
 
         return c, x  # (b, nt, d) or None, (b, n, d)
-
-# time step conditioning embedding
-
-class TimestepEmbedding(nn.Module):
-    def __init__(self, dim, freq_embed_dim=256):
-        super().__init__()
-        self.time_embed = SinusPositionEmbedding(freq_embed_dim)
-        self.time_mlp = nn.Sequential(nn.Linear(freq_embed_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
-
-    def forward(self, timestep: float["b"]):
-        time_hidden = self.time_embed(timestep)
-        time_hidden = time_hidden.to(timestep.dtype)
-        time = self.time_mlp(time_hidden)  # b d
-
-
-# what needs to be extracted from the model?
-# output of each block (after each MMDiT block), output of each FF layer (feedforward inside each block)
-#output of each self-attention layer before res connection (raw-attention output)
-#self-attention matriz (softmax(qk^T)for each head)
-# output of self-attention before the output projection (W^O), the concatenated head outputs before w^o)
