@@ -352,6 +352,7 @@ class MMDiT(nn.Module):
                     f"Shape={values['shape']}, "
                     f"Device='{values['device']}', "
                     f"Mean={tensor.mean():.2f}\n"
+                    f"    Tensor: {tensor}\n"
                 )
         report += "----------------------------"
         return report
@@ -384,3 +385,61 @@ class MMDiT(nn.Module):
         output = self.proj_out(x)
         return output
 
+if __name__ == "__main__":
+    # 1. Define toy hyperparameters
+    BATCH_SIZE, SEQ_LEN, TEXT_LEN, MEL_DIM, MODEL_DIM, TEXT_EMBEDS = 2, 5, 4, 8, 16, 20
+    
+    # 2. Instantiate the new, integrated model
+    model = MMDiT(dim=MODEL_DIM, depth=2, heads=2, dim_head=8, mel_dim=MEL_DIM, text_num_embeds=TEXT_EMBEDS)
+    
+    # 3. Add hooks to demonstrate zeroing out an intermediate tensor
+    
+    # This hook will patch 'c_attn_output' in the first transformer block.
+    # We target the 'attn' layer and select the second tensor (index 1) from its tuple output.
+    model.add_patch_hook(
+        submodule_path='transformer_blocks.0.attn',
+        hook_name='zero_out_c_attn',
+        output_index=1,      # Target c_attn_output (index 1 in the tuple)
+        feature_index=0,
+        batch_index=0,
+        patch_vec=0.0        # Zero out the entire tensor
+    )
+    
+    # This extraction hook will grab the same tensor right after it's been patched
+    # so we can verify the operation was successful.
+    model.add_extraction_hook(
+        submodule_path='transformer_blocks.0.attn',
+        hook_name='verify_c_attn_patch',
+        output_index=1 # Extract the same c_attn_output
+    )
+
+    # 4. Create dummy input tensors
+    x = torch.randn(BATCH_SIZE, SEQ_LEN, MEL_DIM)
+    cond = torch.randn(BATCH_SIZE, SEQ_LEN, MEL_DIM)
+    text = torch.randint(0, TEXT_EMBEDS, (BATCH_SIZE, TEXT_LEN), dtype=torch.long)
+    time = torch.tensor(0.5)
+
+    # 5. Run a single forward pass
+    print("\n--- Running forward pass ---")
+    output = model(x=x, cond=cond, text=text, time=time)
+    print("Forward pass successful!")
+
+    # 6. Access and print the activations
+    print("\n" + str(model))
+
+    # 7. Verify that the intermediate patch was applied
+    print("\n--- Verifying Intermediate Patch ---")
+    
+    # Check the extracted 'c_attn_output' tensor
+    c_attn_tensor_info = model.extracted_activations['verify_c_attn_patch']
+    c_attn_tensor = c_attn_tensor_info['tensor']
+    
+    # The patch should make the mean of the tensor exactly 0.0
+    patch_successful = (c_attn_tensor.mean() == 0.0).item()
+    
+    print(f"Intermediate 'c_attn_output' successfully zeroed out: {patch_successful}")
+    print(f"Mean of extracted tensor: {c_attn_tensor.mean():.4f}")
+    assert patch_successful
+
+    # 8. Clean up all hooks when you're done
+    model.remove_hooks()
