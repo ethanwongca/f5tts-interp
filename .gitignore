@@ -50,3 +50,6 @@ wandb/
 *.tar.gz
 *.zip
 *.wav
+
+checkpoint
+reference_audio
